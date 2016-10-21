@@ -1,14 +1,11 @@
-package main
+# Coldlink
 
-import (
-	"fmt"
-	"os"
+"unhotlinks" images optionally creating additional thumbnail versions.
 
-	"github.com/warmans/coldlink"
-)
+As per example in `example` dir:
 
-func main() {
 
+```
 	cl := coldlink.Coldlink{StorageDir: ".", MaxOrigImageSizeInBytes: 10485760}
 	result, err := cl.Get(
 		"https://pixabay.com/static/uploads/photo/2016/09/30/11/54/owl-1705112_960_720.jpg",
@@ -21,4 +18,4 @@ func main() {
 	}
 
 	fmt.Printf("%+v\n", result)
-}
+```

@@ -22,42 +22,57 @@ type MakeFn func(rawFilePath, localName string) (string, error)
 
 type Coldlink struct {
 	StorageDir string
+	MaxOrigImageSizeInBytes int64
 }
 
 func (c *Coldlink) Get(remoteURL, localName string, targets []string) (map[string]string, error) {
 
 	results := make(map[string]string)
 
-	tempFilePath, err := c.GetTempImage(remoteURL)
+	tempFilePath, err, deleteFn := c.GetTempImage(remoteURL)
 	if err != nil {
 		return results, err
 	}
 
-	optFuncMap := map[string]MakeFn{
-		OPT_ORIG: c.MakeOrig,
-		OPT_SM:   c.MakeSm,
-		OPT_XS:   c.MakeXs,
-	}
-
-	for _, target := range targets {
-		makeFn, ok := optFuncMap[target]
-		if ok == false {
-			return results, fmt.Errorf("Unknown target %s", target)
+	results, err = func() (map[string]string, error) {
+		optFuncMap := map[string]MakeFn{
+			OPT_ORIG: c.MakeOrig,
+			OPT_SM:   c.MakeSm,
+			OPT_XS:   c.MakeXs,
 		}
-		origPath, err := makeFn(tempFilePath, localName)
-		if err != nil {
+
+		for _, target := range targets {
+			makeFn, ok := optFuncMap[target]
+			if ok == false {
+				return results, fmt.Errorf("Unknown target %s", target)
+			}
+			origPath, err := makeFn(tempFilePath, localName)
+			if err != nil {
+				return results, err
+			}
+			results[target] = origPath
+		}
+
+		//cleanup temp image
+		if err := os.Remove(tempFilePath); err != nil {
 			return results, err
 		}
-		results[target] = origPath
+		return results, nil
+	}()
+
+	if deleteErr := deleteFn(); deleteErr != nil {
+		if err != nil {
+			return nil, fmt.Errorf("Failed: %s (also failed to remove temp image: %s)", err, deleteErr)
+		}
 	}
 
-	return results, nil
+	return results, err
 }
 
-func (c *Coldlink) GetTempImage(remoteUrl string) (string, error) {
+func (c *Coldlink) GetTempImage(remoteUrl string) (string, error, func() error) {
 	response, e := http.Get(remoteUrl)
 	if e != nil {
-		return "", e
+		return "", e, func() error { return nil }
 	}
 	defer response.Body.Close()
 
@@ -65,22 +80,33 @@ func (c *Coldlink) GetTempImage(remoteUrl string) (string, error) {
 
 	tempfile, err := ioutil.TempFile(os.TempDir(), "cold")
 	if err != nil {
-		return "", err
+		return "", err, func() error { return nil }
 	}
 
-	_, err = io.Copy(tempfile, response.Body)
+	written, err := io.Copy(tempfile, response.Body)
 	if err != nil {
-		return "", err
+		return "", err, func() error { return nil }
 	}
 	tempfile.Close()
+
+	deleteFn := func() error { return os.Remove(tempfile.Name()) }
+
+	//guard against extremely large image being processed if specified
+	if c.MaxOrigImageSizeInBytes > 0 && written > c.MaxOrigImageSizeInBytes {
+		toBigErr := fmt.Errorf("Origin image was too big (%d bytes)", written)
+		if err := deleteFn(); err != nil {
+			toBigErr = fmt.Errorf("%s, also failed to remove temp image because %s", toBigErr.Error(), err.Error())
+		}
+		return "", toBigErr, func() error { return nil }
+	}
 
 	//add extension
 	finalName := tempfile.Name() + fileExtension
 	if err = os.Rename(tempfile.Name(), finalName); err != nil {
-		return "", err
+		return "", err, deleteFn
 	}
 
-	return finalName, nil
+	return finalName, nil, func() error { return os.Remove(finalName) }
 }
 
 //MakeOrig just copies the original file somewhere without changing it
