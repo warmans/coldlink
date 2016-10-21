@@ -13,19 +13,23 @@ import (
 )
 
 const (
-	OPT_ORIG = "orig" //original dimensions
-	OPT_SM   = "sm"   //150x150
-	OPT_XS   = "xs"   //50x50
+	OP_ORIG = iota + 1
+	OP_THUMB
 )
 
-type MakeFn func(rawFilePath, localName string) (string, error)
+type TargetSpec struct {
+	Name   string //used as a suffix in output file (also used to identify path in response)
+	Op     int    //one of OP_ consts
+	Width  int    //note these are ignored by OP_ORIG
+	Height int
+}
 
 type Coldlink struct {
-	StorageDir string
+	StorageDir              string
 	MaxOrigImageSizeInBytes int64
 }
 
-func (c *Coldlink) Get(remoteURL, localName string, targets []string) (map[string]string, error) {
+func (c *Coldlink) Get(remoteURL, localName string, targets []*TargetSpec) (map[string]string, error) {
 
 	results := make(map[string]string)
 
@@ -35,22 +39,26 @@ func (c *Coldlink) Get(remoteURL, localName string, targets []string) (map[strin
 	}
 
 	results, err = func() (map[string]string, error) {
-		optFuncMap := map[string]MakeFn{
-			OPT_ORIG: c.MakeOrig,
-			OPT_SM:   c.MakeSm,
-			OPT_XS:   c.MakeXs,
-		}
 
 		for _, target := range targets {
-			makeFn, ok := optFuncMap[target]
-			if ok == false {
-				return results, fmt.Errorf("Unknown target %s", target)
+
+			switch true {
+			case target.Op == OP_THUMB:
+				origPath, err := c.MakeThumb(tempFilePath, localName, target.Name, target.Width, target.Height)
+				if err != nil {
+					return results, err
+				}
+				results[target.Name] = origPath
+			case target.Op == OP_ORIG:
+				origPath, err := c.MakeOrig(tempFilePath, localName, target.Name)
+				if err != nil {
+					return results, err
+				}
+				results[target.Name] = origPath
+			default:
+				return results, fmt.Errorf("Unknown target  operation: %s", target.Op)
+
 			}
-			origPath, err := makeFn(tempFilePath, localName)
-			if err != nil {
-				return results, err
-			}
-			results[target] = origPath
 		}
 
 		//cleanup temp image
@@ -110,9 +118,9 @@ func (c *Coldlink) GetTempImage(remoteUrl string) (string, error, func() error) 
 }
 
 //MakeOrig just copies the original file somewhere without changing it
-func (c *Coldlink) MakeOrig(rawFilePath, localName string) (string, error) {
+func (c *Coldlink) MakeOrig(rawFilePath, localName, suffix string) (string, error) {
 
-	filePath, fileName := c.makeFilePath(localName, OPT_ORIG, filepath.Ext(rawFilePath))
+	filePath, fileName := c.makeFilePath(localName, suffix, filepath.Ext(rawFilePath))
 
 	srcFile, err := os.Open(rawFilePath)
 	if err != nil {
@@ -134,22 +142,14 @@ func (c *Coldlink) MakeOrig(rawFilePath, localName string) (string, error) {
 	return fileName, nil
 }
 
-func (c *Coldlink) MakeSm(rawFilePath, localName string) (string, error) {
-	return c.MakeThumb(rawFilePath, localName, OPT_SM, 150, 150)
-}
-
-func (c *Coldlink) MakeXs(rawFilePath, localName string) (string, error) {
-	return c.MakeThumb(rawFilePath, localName, OPT_XS, 50, 50)
-}
-
-func (c *Coldlink) MakeThumb(rawFilePath, localName, typeName string, width, height int) (string, error) {
+func (c *Coldlink) MakeThumb(rawFilePath, localName, suffix string, width, height int) (string, error) {
 	img, err := imaging.Open(rawFilePath)
 	if err != nil {
 		return "", err
 	}
 	thumb := imaging.Thumbnail(img, width, height, imaging.CatmullRom)
 
-	filePath, fileName := c.makeFilePath(localName, typeName, filepath.Ext(rawFilePath))
+	filePath, fileName := c.makeFilePath(localName, suffix, filepath.Ext(rawFilePath))
 	if err := imaging.Save(thumb, filePath); err != nil {
 		return "", err
 	}
