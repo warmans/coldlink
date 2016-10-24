@@ -80,6 +80,13 @@ func (c *Coldlink) Get(remoteURL, localName string, targets []*TargetSpec) (map[
 		}
 		return results, nil
 	}()
+	if err != nil {
+		closeErr := tempFile.Close()
+		if closeErr != nil {
+			return results, fmt.Errorf("two errors: processing request: %s, closing temp file: %s", err, closeErr)
+		}
+		return results, err
+	}
 
 	//cleanup temp image
 	if err := tempFile.Close(); err != nil {
@@ -116,7 +123,6 @@ func (c *Coldlink) GetTempImage(remoteURL string) (*TempFile, error) {
 		}
 		return nil, tooBigErr
 	}
-
 	//add extension
 	finalName := tempFile.Name() + filepath.Ext(remoteURL)
 	if err = os.Rename(tempFile.Name(), finalName); err != nil {
