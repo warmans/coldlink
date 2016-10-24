@@ -118,7 +118,7 @@ func (c *Coldlink) GetTempImage(remoteURL string) (*TempFile, error) {
 	}
 
 	//add extension
-	finalName := tempFile.Name() + fileExtension
+	finalName := tempFile.Name() + filepath.Ext(remoteURL)
 	if err = os.Rename(tempFile.Name(), finalName); err != nil {
 		closeErr := tempFile.Close()
 		if closeErr != nil {
