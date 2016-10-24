@@ -12,11 +12,13 @@ import (
 	"github.com/disintegration/imaging"
 )
 
+// Options for image targets
 const (
-	OP_ORIG = iota + 1
-	OP_THUMB
+	OpOriginal = iota + 1
+	OpThumb
 )
 
+// TargetSpec describes an image output target
 type TargetSpec struct {
 	Name   string //used as a suffix in output file (also used to identify path in response)
 	Op     int    //one of OP_ consts
@@ -24,16 +26,33 @@ type TargetSpec struct {
 	Height int
 }
 
+// Coldlink handles fetching, resizing, and storing images from remote URLs
 type Coldlink struct {
 	StorageDir              string
 	MaxOrigImageSizeInBytes int64
 }
 
+// TempFile is an image file that is deleted when closed
+// this is handy for ReadCloser implementations of temporary files
+type TempFile struct {
+	*os.File
+}
+
+// Close closes the file handle then deletes the underlying file
+func (t *TempFile) Close() error {
+	err := t.File.Close()
+	if err != nil {
+		return err
+	}
+	return os.Remove(t.Name())
+}
+
+// Get an image, storing it locally in the defned target formats
 func (c *Coldlink) Get(remoteURL, localName string, targets []*TargetSpec) (map[string]string, error) {
 
 	results := make(map[string]string)
 
-	tempFilePath, err, deleteFn := c.GetTempImage(remoteURL)
+	tempFile, err := c.GetTempImage(remoteURL)
 	if err != nil {
 		return results, err
 	}
@@ -43,78 +62,73 @@ func (c *Coldlink) Get(remoteURL, localName string, targets []*TargetSpec) (map[
 		for _, target := range targets {
 
 			switch true {
-			case target.Op == OP_THUMB:
-				origPath, err := c.MakeThumb(tempFilePath, localName, target.Name, target.Width, target.Height)
+			case target.Op == OpThumb:
+				origPath, err := c.MakeThumb(tempFile.Name(), localName, target.Name, target.Width, target.Height)
 				if err != nil {
 					return results, err
 				}
 				results[target.Name] = origPath
-			case target.Op == OP_ORIG:
-				origPath, err := c.MakeOrig(tempFilePath, localName, target.Name)
+			case target.Op == OpOriginal:
+				origPath, err := c.MakeOrig(tempFile.Name(), localName, target.Name)
 				if err != nil {
 					return results, err
 				}
 				results[target.Name] = origPath
 			default:
-				return results, fmt.Errorf("Unknown target  operation: %s", target.Op)
-
+				return results, fmt.Errorf("Unknown target  operation: %v", target.Op)
 			}
-		}
-
-		//cleanup temp image
-		if err := os.Remove(tempFilePath); err != nil {
-			return results, err
 		}
 		return results, nil
 	}()
 
-	if deleteErr := deleteFn(); deleteErr != nil {
-		if err != nil {
-			return nil, fmt.Errorf("Failed: %s (also failed to remove temp image: %s)", err, deleteErr)
-		}
+	//cleanup temp image
+	if err := tempFile.Close(); err != nil {
+		return results, err
 	}
 
 	return results, err
 }
 
-func (c *Coldlink) GetTempImage(remoteUrl string) (string, error, func() error) {
-	response, e := http.Get(remoteUrl)
-	if e != nil {
-		return "", e, func() error { return nil }
+// GetTempImage retrieves an image and stores it in a temporary file
+func (c *Coldlink) GetTempImage(remoteURL string) (*TempFile, error) {
+	response, err := http.Get(remoteURL)
+	if err != nil {
+		return nil, err
 	}
 	defer response.Body.Close()
 
-	fileExtension := filepath.Ext(remoteUrl)
-
-	tempfile, err := ioutil.TempFile(os.TempDir(), "cold")
+	tf, err := ioutil.TempFile(os.TempDir(), "cold")
 	if err != nil {
-		return "", err, func() error { return nil }
+		return nil, err
 	}
+	tempFile := &TempFile{tf}
 
-	written, err := io.Copy(tempfile, response.Body)
+	written, err := io.Copy(tempFile, response.Body)
 	if err != nil {
-		return "", err, func() error { return nil }
+		return nil, err
 	}
-	tempfile.Close()
-
-	deleteFn := func() error { return os.Remove(tempfile.Name()) }
 
 	//guard against extremely large image being processed if specified
 	if c.MaxOrigImageSizeInBytes > 0 && written > c.MaxOrigImageSizeInBytes {
-		toBigErr := fmt.Errorf("Origin image was too big (%d bytes)", written)
-		if err := deleteFn(); err != nil {
-			toBigErr = fmt.Errorf("%s, also failed to remove temp image because %s", toBigErr.Error(), err.Error())
+		tooBigErr := fmt.Errorf("Origin image was too big (%d bytes)", written)
+		if err := tempFile.Close(); err != nil {
+			tooBigErr = fmt.Errorf("%s, also failed to remove temp image because %s", tooBigErr, err)
 		}
-		return "", toBigErr, func() error { return nil }
+		return nil, tooBigErr
 	}
 
 	//add extension
-	finalName := tempfile.Name() + fileExtension
-	if err = os.Rename(tempfile.Name(), finalName); err != nil {
-		return "", err, deleteFn
+	finalName := tempFile.Name() + fileExtension
+	if err = os.Rename(tempFile.Name(), finalName); err != nil {
+		closeErr := tempFile.Close()
+		if closeErr != nil {
+			return nil, fmt.Errorf("error renaming and closing temp file: %s - %s", err, closeErr)
+		}
+		return nil, err
 	}
-
-	return finalName, nil, func() error { return os.Remove(finalName) }
+	tempFile.File.Close()
+	tempFile.File, err = os.Open(finalName)
+	return tempFile, err
 }
 
 //MakeOrig just copies the original file somewhere without changing it
@@ -142,6 +156,7 @@ func (c *Coldlink) MakeOrig(rawFilePath, localName, suffix string) (string, erro
 	return fileName, nil
 }
 
+// MakeThumb creates a thumbnail image with the given width and height
 func (c *Coldlink) MakeThumb(rawFilePath, localName, suffix string, width, height int) (string, error) {
 	img, err := imaging.Open(rawFilePath)
 	if err != nil {
